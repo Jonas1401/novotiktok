@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Streamer - Tower Control</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #12081a; color: #eee; padding: 24px; max-width: 480px; margin: 0 auto; }
+    h1 { font-size: 1.2rem; margin-bottom: 16px; }
+    label { display: block; margin-top: 12px; font-size: 12px; opacity: 0.85; }
+    input, button, select { width: 100%; padding: 10px; margin-top: 6px; border-radius: 8px; border: 1px solid #444; background: #1e1428; color: #fff; }
+    button { cursor: pointer; background: linear-gradient(135deg, #ff3b8d, #7b5cff); border: none; font-weight: 700; margin-top: 10px; }
+    button:hover { filter: brightness(1.08); }
+    button.ghost { background: #241a30; border: 1px solid #4a3a5c; font-weight: 600; }
+    .row { margin-bottom: 18px; padding-bottom: 18px; border-bottom: 1px solid #2a2035; }
+    #out { margin-top: 16px; font-size: 12px; white-space: pre-wrap; color: #9fa; }
+    .hint { font-size: 11px; opacity: 0.65; margin-top: 8px; }
+    .warn { font-size: 11px; color: #ffcf7a; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Tower Battle - Streamer Panel</h1>
+  <p class="hint">Send the <code>ADMIN_TOKEN</code> you configured on the server. If you never set one, the fallback token is <code>admindev</code>.</p>
+  <p class="warn">Set a strong <code>ADMIN_TOKEN</code> before going live - the fallback is public.</p>
+
+  <div class="row">
+    <label>Admin token</label>
+    <input type="password" id="token" placeholder="ADMIN_TOKEN" autocomplete="off" />
+  </div>
+
+  <div class="row">
+    <label>Extend match (extra time, ms)</label>
+    <input type="number" id="extendMs" value="60000" min="10000" step="1000" />
+    <button type="button" id="btnExtend">Extend time</button>
+  </div>
+
+  <div class="row">
+    <label>Bot soldier (team)</label>
+    <select id="botTeam">
+      <option value="red">Red</option>
+      <option value="blue">Blue</option>
+    </select>
+    <input type="text" id="botName" placeholder="Name (optional)" maxlength="24" />
+    <button type="button" id="btnBot">Send bot</button>
+  </div>
+
+  <div class="row">
+    <label>Power mode duration (ms)</label>
+    <input type="number" id="powerModeMs" value="60000" min="5000" step="1000" />
+    <button type="button" id="btnPowerMode">Start power mode</button>
+  </div>
+
+  <div class="row">
+    <button type="button" id="btnSudden">Final round (high impact) - manual</button>
+    <button type="button" class="ghost" id="btnReset">Reset match now</button>
+  </div>
+
+  <div class="row">
+    <label>Offline test events (no TikTok connection needed)</label>
+    <input type="text" id="simName" placeholder="Viewer name (optional)" maxlength="24" />
+    <input type="number" id="simDiamonds" value="50" min="1" step="1" />
+    <button type="button" class="ghost" id="btnSimGift">Simulate gift</button>
+    <button type="button" class="ghost" id="btnSimChatRed">Simulate chat "1" (red)</button>
+    <button type="button" class="ghost" id="btnSimChatBlue">Simulate chat "2" (blue)</button>
+    <button type="button" class="ghost" id="btnSimJoin">Simulate viewer join</button>
+    <button type="button" class="ghost" id="btnSimLikes">Simulate 200 likes</button>
+    <p class="hint">Open the game view in another tab to watch these drive the overlay.</p>
+  </div>
+
+  <div id="out"></div>
+
+  <script>
+    const out = document.getElementById('out');
+    function token() {
+      return document.getElementById('token').value.trim();
+    }
+    async function api(body) {
+      const t = token();
+      if (!t) {
+        out.textContent = 'Enter the ADMIN_TOKEN first.';
+        return;
+      }
+      try {
+        const r = await fetch('/admin/api', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + t },
+          body: JSON.stringify({ ...body, token: t }),
+        });
+        const j = await r.json().catch(() => ({}));
+        out.textContent = JSON.stringify(j, null, 2);
+      } catch (e) {
+        out.textContent = 'Request failed: ' + e;
+      }
+    }
+    const simName = () => document.getElementById('simName').value || 'Test Viewer';
+    const simDiamonds = () => Number(document.getElementById('simDiamonds').value) || 50;
+
+    document.getElementById('btnExtend').onclick = () =>
+      api({ action: 'extendMatch', ms: Number(document.getElementById('extendMs').value) || 60000 });
+    document.getElementById('btnBot').onclick = () =>
+      api({
+        action: 'spawnBot',
+        team: document.getElementById('botTeam').value,
+        name: document.getElementById('botName').value || 'Support Bot',
+      });
+    document.getElementById('btnPowerMode').onclick = () =>
+      api({ action: 'powerMode', ms: Number(document.getElementById('powerModeMs').value) || 60000 });
+    document.getElementById('btnSudden').onclick = () => api({ action: 'suddenDeath' });
+    document.getElementById('btnReset').onclick = () => api({ action: 'resetMatch' });
+
+    document.getElementById('btnSimGift').onclick = () =>
+      api({ action: 'simulateGift', nickname: simName(), diamonds: simDiamonds() });
+    document.getElementById('btnSimChatRed').onclick = () =>
+      api({ action: 'simulateChat', nickname: simName(), comment: '1' });
+    document.getElementById('btnSimChatBlue').onclick = () =>
+      api({ action: 'simulateChat', nickname: simName(), comment: '2' });
+    document.getElementById('btnSimJoin').onclick = () =>
+      api({ action: 'simulateJoin', nickname: simName() });
+    document.getElementById('btnSimLikes').onclick = () =>
+      api({ action: 'simulateLikes', count: 200 });
+  </script>
+</body>
+</html>

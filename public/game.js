@@ -3,7 +3,15 @@
 
   const EMOJI_BULLETS = ['💥', '⚡', '❤️', '🔥', '✨', '🌟', '💫', '🎯'];
 
-  const socket = io({ transports: ['websocket', 'polling'] });
+  // Same origin by default. When the overlay is hosted separately from the game server
+  // (for example a static CDN in front of a container host), set window.GAME_SERVER_URL
+  // in index.html to the game server's origin.
+  const socket = io(
+    typeof window.GAME_SERVER_URL === 'string' && window.GAME_SERVER_URL
+      ? window.GAME_SERVER_URL
+      : undefined,
+    { transports: ['websocket', 'polling'] }
+  );
 
   const stage = document.getElementById('stage');
   const canvas = document.getElementById('gameCanvas');

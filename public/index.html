@@ -103,6 +103,9 @@
     </div>
   </div>
 
+  <!-- Only needed when this page is served from a different origin than the game server,
+       for example a static CDN in front of a container host. Leave it out for same-origin. -->
+  <!-- <script>window.GAME_SERVER_URL = 'https://your-game-server.example.com';</script> -->
   <script src="/socket.io/socket.io.js"></script>
   <script src="/game.js"></script>
 </body>

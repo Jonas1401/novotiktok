@@ -1,17 +1,45 @@
 'use strict';
 
-const TIKTOK_USERNAME = (process.env.TIKTOK_USERNAME || 'stream_account').trim();
+const TIKTOK_USERNAME = (process.env.TIKTOK_USERNAME || '').trim();
 const TIKTOK_ROOM_ID = (process.env.TIKTOK_ROOM_ID || '').trim();
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'admindev';
+
+const DEFAULT_ADMIN_TOKEN = 'admindev';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || DEFAULT_ADMIN_TOKEN;
+const IS_DEFAULT_ADMIN_TOKEN = ADMIN_TOKEN === DEFAULT_ADMIN_TOKEN;
 
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const crypto = require('crypto');
 const express = require('express');
 const { Server } = require('socket.io');
-const { WebcastPushConnection } = require('tiktok-live-connector');
 
-const PORT = process.env.PORT || 3000;
+// tiktok-live-connector 2.x is the maintained release. Its `/legacy` entry point exports the
+// same `WebcastPushConnection` class as 1.x, so the rest of this file works unchanged.
+// 1.x (which this project used to pin) stopped tracking TikTok's protocol in mid-2024.
+// 2.x is ESM-only, and `require()` of an ESM module fails before Node 20.19 / 22.12, so we
+// load it with a dynamic import() and fall back to "no TikTok" mode if anything goes wrong.
+let WebcastPushConnection = null;
+let connectorLoadError = null;
+const connectorReady = (async () => {
+  try {
+    const mod = await import('tiktok-live-connector/legacy');
+    WebcastPushConnection = mod.WebcastPushConnection || null;
+  } catch (legacyErr) {
+    if (legacyErr && legacyErr.code !== 'ERR_MODULE_NOT_FOUND') connectorLoadError = legacyErr;
+  }
+  if (!WebcastPushConnection) {
+    try {
+      const mod = await import('tiktok-live-connector');
+      WebcastPushConnection = mod.WebcastPushConnection || null;
+    } catch (err) {
+      connectorLoadError = connectorLoadError || err;
+    }
+  }
+})();
+
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
 
 const DAMAGE_PER_DIAMOND = 1;
 const POWER_FILL_PER_LIKE = 0.08;
@@ -37,7 +65,8 @@ const AUTO_JOIN_SOLDIER_ENABLED = true;
 const KILL_FEED_MIN_DAMAGE = 1200;
 const KILL_FEED_MIN_MULT = 25;
 
-const LEADERBOARD_FILE = path.join(__dirname, 'data', 'leaderboard.json');
+const LEADERBOARD_FILE =
+  process.env.LEADERBOARD_FILE || path.join(__dirname, 'data', 'leaderboard.json');
 
 let gameState = {
   red: { hp: 10000, maxHp: 10000, captain: null },
@@ -66,6 +95,7 @@ let doubleMultiplierUntil = 0;
 let postGameTimer = null;
 let tiktokConn = null;
 let reconnectTimer = null;
+let currentTiktokStatus = { ok: false, msg: 'Not connected yet.' };
 let likeBatchTimer = null;
 let pendingLikes = 0;
 let last60Announced = false;
@@ -81,32 +111,85 @@ function dayKey() {
   return new Date().toISOString().slice(0, 10);
 }
 
+let leaderboardCache = null;
+let leaderboardFlushTimer = null;
+let leaderboardWriteWarned = false;
+const LEADERBOARD_FLUSH_MS = 1000;
+
 function readLeaderboard() {
+  if (leaderboardCache && leaderboardCache.dayKey === dayKey()) return leaderboardCache;
+
+  let parsed = null;
   try {
-    const d = fs.readFileSync(LEADERBOARD_FILE, 'utf8');
-    return JSON.parse(d);
+    parsed = JSON.parse(fs.readFileSync(LEADERBOARD_FILE, 'utf8'));
   } catch (_) {
-    return { dayKey: dayKey(), entries: {} };
+    parsed = null;
+  }
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    !parsed.entries ||
+    typeof parsed.entries !== 'object' ||
+    parsed.dayKey !== dayKey()
+  ) {
+    parsed = { dayKey: dayKey(), entries: {} };
+  }
+  leaderboardCache = parsed;
+  return parsed;
+}
+
+// Atomic write: a crash mid-write can never truncate the existing leaderboard file.
+// Non-fatal: a read-only filesystem degrades to "scores are not persisted" rather than
+// taking the stream down on the first gift.
+function writeLeaderboard(lb) {
+  const tmp = `${LEADERBOARD_FILE}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(LEADERBOARD_FILE), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(lb, null, 2), 'utf8');
+    fs.renameSync(tmp, LEADERBOARD_FILE);
+  } catch (err) {
+    if (!leaderboardWriteWarned) {
+      leaderboardWriteWarned = true;
+      console.warn(
+        `[leaderboard] Could not persist to ${LEADERBOARD_FILE} (${err.code || err.message}). ` +
+          'Playback continues, but scores will not survive a restart. ' +
+          'Point LEADERBOARD_FILE at a writable path or mount a volume.'
+      );
+    }
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch (_) {}
   }
 }
 
-function writeLeaderboard(lb) {
-  fs.mkdirSync(path.dirname(LEADERBOARD_FILE), { recursive: true });
-  fs.writeFileSync(LEADERBOARD_FILE, JSON.stringify(lb, null, 2), 'utf8');
+// Damage arrives in bursts, so coalesce disk writes instead of rewriting the JSON
+// file on every single gift.
+function scheduleLeaderboardFlush() {
+  if (leaderboardFlushTimer) return;
+  leaderboardFlushTimer = setTimeout(() => {
+    leaderboardFlushTimer = null;
+    if (leaderboardCache) writeLeaderboard(leaderboardCache);
+  }, LEADERBOARD_FLUSH_MS);
+  if (typeof leaderboardFlushTimer.unref === 'function') leaderboardFlushTimer.unref();
+}
+
+function flushLeaderboardNow() {
+  if (leaderboardFlushTimer) {
+    clearTimeout(leaderboardFlushTimer);
+    leaderboardFlushTimer = null;
+  }
+  if (leaderboardCache) writeLeaderboard(leaderboardCache);
 }
 
 function recordDamage(uid, nickname, avatar, dmg) {
   if (!uid || dmg <= 0) return;
-  let lb = readLeaderboard();
-  if (lb.dayKey !== dayKey()) {
-    lb = { dayKey: dayKey(), entries: {} };
-  }
+  const lb = readLeaderboard();
   const e = lb.entries[uid] || { nickname: nickname || 'Player', avatar: avatar || '', damage: 0 };
   e.damage += dmg;
   e.nickname = nickname || e.nickname;
   e.avatar = avatar || e.avatar;
   lb.entries[uid] = e;
-  writeLeaderboard(lb);
+  scheduleLeaderboardFlush();
 }
 
 function topLeaderboard(n) {
@@ -362,6 +445,39 @@ function broadcastState(io) {
     },
     teamTotals: teamMatchTotals(),
   });
+}
+
+// tiktok-live-connector 2.x emits `{ info, exception }` on its "error" event rather than a
+// plain Error, which is why naive stringification shows "[object Object]".
+function errorText(err) {
+  if (err == null) return 'Unknown error';
+  if (typeof err === 'string') return err;
+  if (typeof err.info === 'string' && err.info) return err.info;
+  if (typeof err.message === 'string' && err.message) return err.message;
+  if (err.exception && typeof err.exception.message === 'string' && err.exception.message) {
+    return err.exception.message;
+  }
+  try {
+    const s = JSON.stringify(err);
+    if (s && s !== '{}') return s;
+  } catch (_) {}
+  return String(err);
+}
+
+function setTiktokStatus(io, status) {
+  currentTiktokStatus = status;
+  io.emit('tiktokStatus', status);
+}
+
+// Builds a viewer object for the /admin/api "simulate*" test actions.
+function demoUser(body) {
+  const uid = String(body.uniqueId || `demo_${Math.floor(Math.random() * 1e6)}`);
+  return {
+    uniqueId: uid,
+    userId: uid,
+    nickname: String(body.nickname || uid).slice(0, 24),
+    avatar: String(body.avatar || ''),
+  };
 }
 
 function extractUser(g) {
@@ -680,7 +796,7 @@ function handleChat(raw, io) {
   }
 }
 
-function connectTikTok(io) {
+async function connectTikTok(io) {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -693,11 +809,24 @@ function connectTikTok(io) {
     tiktokConn = null;
   }
 
+  await connectorReady;
+
+  if (!WebcastPushConnection) {
+    const detail = connectorLoadError ? ` (${connectorLoadError.message})` : '';
+    const msg =
+      `tiktok-live-connector could not be loaded${detail}. TikTok events are disabled; ` +
+      'the game and the admin panel still work. Run "npm install" and restart to enable them.';
+    console.error('[TikTok]', msg);
+    setTiktokStatus(io, { ok: false, msg, demo: true });
+    return;
+  }
+
   if (!TIKTOK_USERNAME) {
     const msg =
-      'TIKTOK_USERNAME is empty. Check the environment variable or the default username in server.js.';
-    console.error('[TikTok]', msg);
-    io.emit('tiktokStatus', { ok: false, msg });
+      'TIKTOK_USERNAME is not set, so the game runs without a TikTok connection. ' +
+      'Set TIKTOK_USERNAME (or TIKTOK_ROOM_ID) to receive live events.';
+    console.warn('[TikTok]', msg);
+    setTiktokStatus(io, { ok: false, msg, demo: true });
     return;
   }
 
@@ -709,23 +838,29 @@ function connectTikTok(io) {
 
   const roomArg = TIKTOK_ROOM_ID ? TIKTOK_ROOM_ID : undefined;
 
+  setTiktokStatus(io, { ok: false, msg: `Connecting to @${TIKTOK_USERNAME}...` });
+
   conn
     .connect(roomArg)
     .then(() => {
-      io.emit('tiktokStatus', { ok: true, msg: 'TikTok live connection is ready.' });
+      console.log(`[TikTok] Connected to @${TIKTOK_USERNAME}.`);
+      setTiktokStatus(io, { ok: true, msg: `Connected to @${TIKTOK_USERNAME}.` });
     })
     .catch((err) => {
-      const text = String(err && err.message ? err.message : err);
-      const hint =
-        /user_not_found|19881007/i.test(text)
-          ? ' Check the username (without @) and make sure the livestream is active. If needed, try TIKTOK_ROOM_ID.'
-          : '';
-      io.emit('tiktokStatus', {
-        ok: false,
-        msg: text + hint,
-      });
-      const delay = /user_not_found|19881007|YOUR_TIKTOK/i.test(text) ? 60_000 : 5000;
-      reconnectTimer = setTimeout(() => connectTikTok(io), delay);
+      const text = errorText(err);
+      const isMissingOrOffline = /user_not_found|19881007|offline|not live|retrieve Room ID/i.test(
+        text
+      );
+      const hint = isMissingOrOffline
+        ? ' Check the username (no leading @) and make sure you are actually live. ' +
+          'You can also pass TIKTOK_ROOM_ID directly.'
+        : '';
+      console.warn(`[TikTok] ${text}${hint}`);
+      setTiktokStatus(io, { ok: false, msg: text + hint });
+      const delay = isMissingOrOffline ? 60_000 : 5000;
+      reconnectTimer = setTimeout(() => {
+        connectTikTok(io).catch(() => {});
+      }, delay);
     });
 
   conn.on('gift', (p) => queueGiftForBatch(p, io));
@@ -754,15 +889,14 @@ function connectTikTok(io) {
   });
 
   conn.on('streamEnd', () => {
-    io.emit('tiktokStatus', { ok: false, msg: 'Stream ended. Reconnecting...' });
-    reconnectTimer = setTimeout(() => connectTikTok(io), 8000);
+    setTiktokStatus(io, { ok: false, msg: 'Stream ended. Reconnecting...' });
+    reconnectTimer = setTimeout(() => {
+      connectTikTok(io).catch(() => {});
+    }, 8000);
   });
 
   conn.on('error', (err) => {
-    io.emit('tiktokStatus', {
-      ok: false,
-      msg: `Error: ${String(err && err.message ? err.message : err)}`,
-    });
+    setTiktokStatus(io, { ok: false, msg: errorText(err) });
   });
 
   tiktokConn = conn;
@@ -823,10 +957,30 @@ app.get('/api/leaderboard', (req, res) => {
   res.json({ ok: true, top: topLeaderboard(10), dayKey: dayKey() });
 });
 
+// Used by container hosts (Render/Railway/Fly/Docker) to decide when the app is ready.
+app.get('/health', (req, res) => {
+  res.json({
+    ok: true,
+    uptimeSeconds: Math.round(process.uptime()),
+    matchRunning: gameState.running,
+    tiktokConnected: currentTiktokStatus.ok === true,
+    tiktok: currentTiktokStatus.msg,
+    winner: gameState.winner,
+  });
+});
+
+function safeEqual(a, b) {
+  const ab = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+
 function adminAuth(req) {
   const h = req.headers.authorization || '';
   const tok = h.startsWith('Bearer ') ? h.slice(7) : req.body?.token;
-  return tok === ADMIN_TOKEN;
+  if (!tok) return false;
+  return safeEqual(tok, ADMIN_TOKEN);
 }
 
 app.post('/admin/api', (req, res) => {
@@ -867,6 +1021,44 @@ app.post('/admin/api', (req, res) => {
       io.emit('suddenDeath', { active: true, damageMult: SUDDEN_DEATH_DAMAGE_MULT });
       return res.json({ ok: true });
     }
+    if (action === 'resetMatch') {
+      resetMatch(io);
+      return res.json({ ok: true });
+    }
+
+    // The actions below inject synthetic viewer events through the exact same code path the
+    // TikTok connector uses. They let you verify the overlay end to end while offline.
+    if (action === 'simulateGift') {
+      const user = demoUser(req.body);
+      lastGiftAt.delete(user.uniqueId);
+      processGiftInternal(
+        {
+          user,
+          _mergedDiamonds: Math.max(1, Math.floor(Number(req.body.diamonds) || 10)),
+          repeatEnd: true,
+        },
+        io
+      );
+      return res.json({ ok: true, simulated: 'gift', user });
+    }
+    if (action === 'simulateChat') {
+      const user = demoUser(req.body);
+      handleChat({ user, comment: String(req.body.comment || '1') }, io);
+      return res.json({ ok: true, simulated: 'chat', user });
+    }
+    if (action === 'simulateJoin') {
+      const user = demoUser(req.body);
+      lastWelcomeAt.delete(user.uniqueId);
+      handleMemberJoin({ user, followerCount: Number(req.body.followers) || 0 }, io);
+      return res.json({ ok: true, simulated: 'join', user });
+    }
+    if (action === 'simulateLikes') {
+      const n = Math.min(5000, Math.max(1, Math.floor(Number(req.body.count) || 200)));
+      pendingLikes += n;
+      flushLikes(io);
+      return res.json({ ok: true, simulated: 'likes', count: n });
+    }
+
     return res.status(400).json({ ok: false, error: 'Unknown action' });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e.message || e) });
@@ -891,10 +1083,7 @@ io.on('connection', (socket) => {
     teamTotals: teamMatchTotals(),
   });
 
-  socket.emit('tiktokStatus', {
-    ok: tiktokConn != null,
-    msg: tiktokConn ? 'Connected.' : 'Connecting...',
-  });
+  socket.emit('tiktokStatus', currentTiktokStatus);
 });
 
 setInterval(() => spikerTick(io), SPIKER_INTERVAL_MS);
@@ -931,14 +1120,55 @@ setInterval(() => {
   broadcastState(io);
 }, 2000);
 
-server.listen(PORT, () => {
-  console.log(`Tower battle server running at http://localhost:${PORT}`);
-  console.log(`Admin panel: http://localhost:${PORT}/admin (token: ADMIN_TOKEN from env or admindev)`);
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[fatal] Port ${PORT} is already in use. Set PORT to a free port and restart.`);
+  } else {
+    console.error('[fatal] Server error:', err);
+  }
+  process.exit(1);
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`Tower battle server listening on http://${HOST}:${PORT}`);
+  console.log(`Game view: /   |   Streamer panel: /admin`);
+  if (IS_DEFAULT_ADMIN_TOKEN) {
+    console.warn(
+      '[security] ADMIN_TOKEN is not set, so /admin/api falls back to the public default ' +
+        '"admindev". Set a strong ADMIN_TOKEN before you go live.'
+    );
+  }
   if (TIKTOK_USERNAME) {
     console.log(
       `[TikTok] Account to connect: @${TIKTOK_USERNAME}` +
-        (TIKTOK_ROOM_ID ? ` (sabit room_id: ${TIKTOK_ROOM_ID.slice(0, 10)}…)` : '')
+        (TIKTOK_ROOM_ID ? ` (fixed room_id: ${TIKTOK_ROOM_ID.slice(0, 10)}…)` : '')
     );
   }
-  connectTikTok(io);
+  connectTikTok(io).catch((err) => {
+    console.error('[TikTok] Unexpected connection error:', err);
+  });
+});
+
+function shutdown(signal) {
+  console.log(`[shutdown] ${signal} received, closing down...`);
+  flushLeaderboardNow();
+  for (const t of [reconnectTimer, postGameTimer, likeBatchTimer, giftBatchTimer]) {
+    if (t) clearTimeout(t);
+  }
+  try {
+    if (tiktokConn) tiktokConn.disconnect();
+  } catch (_) {}
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// A dropped viewer event must never take the stream down mid-match.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
 });
