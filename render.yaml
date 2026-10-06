@@ -1,0 +1,19 @@
+# One-click deploy config for Render (https://render.com).
+# Render keeps a long-lived process and supports WebSockets, which this app needs.
+services:
+  - type: web
+    name: live-tower-battle
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # Generated on first deploy; copy it out of the dashboard to use the admin panel.
+      - key: ADMIN_TOKEN
+        generateValue: true
+      # Set this in the dashboard to your TikTok account name (no leading @).
+      - key: TIKTOK_USERNAME
+        sync: false

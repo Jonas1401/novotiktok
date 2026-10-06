@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Runtime state (daily leaderboard, written by the server)
+data/
+
+# Local environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Hosting platform metadata
+.vercel
+.netlify
+.fly
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
