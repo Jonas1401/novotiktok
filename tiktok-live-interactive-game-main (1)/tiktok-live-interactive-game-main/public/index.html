@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Red vs Blue — Interactive team game</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="viewport">
+    <div id="stage">
+      <canvas id="gameCanvas" aria-hidden="true"></canvas>
+      <div id="critFlash" aria-hidden="true"></div>
+      <div id="powerOverlay"></div>
+      <div id="suddenDeathOverlay" aria-hidden="true"></div>
+      <div id="bonusPoolCelebration" aria-hidden="true">
+        <div id="bonusPoolCelebrationInner"></div>
+      </div>
+      <div id="vipBanner" aria-hidden="true"></div>
+      <div id="leaderboardPanel" aria-hidden="true">
+        <div id="leaderboardTitle">DAILY LEADERS</div>
+        <ol id="leaderboardList"></ol>
+      </div>
+
+      <div id="killFeed" aria-live="polite" aria-label="Latest major support actions"></div>
+
+      <div id="topHud" aria-label="Top information">
+        <div id="topHudRow">
+          <div id="hintPanel">
+            <div class="hint-line">👍 <strong>Likes</strong> fills the power bar; when full, short <strong>double effect</strong> (power mode).</div>
+            <div class="hint-line">💬 Type <span class="kbd">1</span> in chat for <strong>RED</strong>, type <span class="kbd">2</span> for <strong>BLUE</strong> support.</div>
+            <div class="hint-line hint-sub">🎁 When a gift arrives, a short thank-you panel appears and team support is applied · Team chain grants extra power when full · Match bonus score appears after the match ends</div>
+            <p class="legal-disclaimer">For entertainment and visual interaction only; no real-money gameplay or monetary reward promise.</p>
+          </div>
+          <div id="topHudMeta">
+            <div id="matchTimer" aria-live="polite">05:00</div>
+            <div id="viewerBadge" style="display: none"></div>
+          </div>
+        </div>
+
+        <div id="bars">
+          <div class="bar-block bar-block-team" data-team="red">
+            <div class="bar-head">
+              <span class="bar-label">RED</span>
+              <div id="captainChipRed" class="captain-chip" title="Team captain"></div>
+            </div>
+            <div class="hp-bar"><div id="hpRed" class="hp-fill red" style="transform: scaleX(1)"></div></div>
+            <div class="mini-team-head"><span>TOP 3 · PUAN</span></div>
+            <ol class="mini-team-top" id="teamTopRed" title="Top point contributors this round"></ol>
+            <div class="team-total-row" id="teamTotalRed" aria-label="Red team total points"></div>
+          </div>
+          <div class="bar-block bar-block-team" data-team="blue">
+            <div class="bar-head">
+              <span class="bar-label">BLUE</span>
+              <div id="captainChipBlue" class="captain-chip" title="Team captain"></div>
+            </div>
+            <div class="hp-bar"><div id="hpBlue" class="hp-fill blue" style="transform: scaleX(1)"></div></div>
+            <div class="mini-team-head"><span>TOP 3 · PUAN</span></div>
+            <ol class="mini-team-top" id="teamTopBlue" title="Top point contributors this round"></ol>
+            <div class="team-total-row" id="teamTotalBlue" aria-label="Blue team total points"></div>
+          </div>
+          <div id="powerRow">
+            <div id="powerBar"><div id="powerFill"></div></div>
+            <div id="powerLabel">⚡ POWER BAR — LIKE &amp; LIVE INTERACTION</div>
+          </div>
+          <div class="stats-strip">
+            <div id="bonusPoolRow" class="stat-cell stat-cell-pool">
+              <div class="mini-label"><span class="pool-icon" aria-hidden="true">🏆</span> MATCH BONUS</div>
+              <div id="bonusPoolAmount" class="stat-value">0</div>
+              <div class="pool-hint">Score shown for standout supporters at match end</div>
+            </div>
+            <div id="comboRow" class="stat-cell">
+              <div class="mini-label">TEAM CHAIN</div>
+              <div id="comboBar"><div id="comboFill"></div></div>
+              <div id="comboLabel">0 / 5</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="giftOverlay">
+        <canvas id="giftDropCanvas"></canvas>
+        <div id="giftCaption"></div>
+      </div>
+
+      <div id="welcomeOverlay">
+        <img id="welcomeAvatar" alt="" />
+        <div id="welcomeTitle"></div>
+      </div>
+
+      <div id="spiker"></div>
+
+      <div id="mvp">
+        <img id="mvpAvatar" alt="" />
+        <div id="mvpTitle"></div>
+      </div>
+
+      <div id="captainRow">
+        <div id="capRed" class="cap red" style="opacity: 0"></div>
+        <div id="capBlue" class="cap blue" style="opacity: 0"></div>
+      </div>
+      <div id="status"></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/game.js"></script>
+</body>
+</html>
