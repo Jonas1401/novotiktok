@@ -21,6 +21,8 @@
 
   const hpRed = document.getElementById('hpRed');
   const hpBlue = document.getElementById('hpBlue');
+  const hpRedGhost = document.getElementById('hpRedGhost');
+  const hpBlueGhost = document.getElementById('hpBlueGhost');
   const powerFill = document.getElementById('powerFill');
   const powerOverlay = document.getElementById('powerOverlay');
   const powerLabel = document.getElementById('powerLabel');
@@ -77,6 +79,23 @@
   let camZoom = 1;
   let camPanX = 0;
   let camPanY = 0;
+
+  // Screen shake (per-frame, decays smoothly)
+  let shakeMag = 0;
+  // Brief animation freeze on crits so big hits "land"
+  let hitStopUntil = 0;
+  // Per-tower hit reactions
+  const towerHitFlash = { red: 0, blue: 0 };
+  const towerSquash = { red: 0, blue: 0 };
+  // Smoothed HP bars (main fill eases toward real value, ghost trails behind)
+  const displayHp = { red: 1, blue: 1 };
+  const ghostHp = { red: 1, blue: 1 };
+  let winnerSide = null;
+  let vignetteGrad = null;
+
+  const shockwaves = [];
+  const hitGlows = [];
+  const debris = [];
 
   let gameState = {
     red: { hp: 10000, maxHp: 10000, captain: null },
@@ -445,6 +464,16 @@
     pctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     giftDropLogicalW = pw;
     giftDropLogicalH = ph;
+    vignetteGrad = ctx.createRadialGradient(
+      W * 0.5,
+      H * 0.45,
+      Math.min(W, H) * 0.42,
+      W * 0.5,
+      H * 0.55,
+      Math.max(W, H) * 0.78
+    );
+    vignetteGrad.addColorStop(0, 'rgba(0,0,0,0)');
+    vignetteGrad.addColorStop(1, 'rgba(12,0,28,0.3)');
     const ysJoin = getJoinSlotCenterYs();
     for (let j = 0; j < activeJoinParticles.length; j++) {
       const jp = activeJoinParticles[j];
@@ -603,10 +632,34 @@
     }
   }
 
+  function updateHpBars() {
+    if (!hpRed || !hpBlue) return;
+    const rA = hpRatio('red');
+    const bA = hpRatio('blue');
+    displayHp.red += (rA - displayHp.red) * 0.14;
+    displayHp.blue += (bA - displayHp.blue) * 0.14;
+    if (Math.abs(displayHp.red - rA) < 0.0005) displayHp.red = rA;
+    if (Math.abs(displayHp.blue - bA) < 0.0005) displayHp.blue = bA;
+    for (let i = 0; i < 2; i++) {
+      const side = i === 0 ? 'red' : 'blue';
+      if (ghostHp[side] > displayHp[side]) {
+        ghostHp[side] = Math.max(
+          displayHp[side],
+          ghostHp[side] - (0.0016 + (ghostHp[side] - displayHp[side]) * 0.02)
+        );
+      } else {
+        ghostHp[side] = displayHp[side];
+      }
+    }
+    hpRed.style.transform = 'scaleX(' + displayHp.red + ')';
+    hpBlue.style.transform = 'scaleX(' + displayHp.blue + ')';
+    if (hpRedGhost) hpRedGhost.style.transform = 'scaleX(' + ghostHp.red + ')';
+    if (hpBlueGhost) hpBlueGhost.style.transform = 'scaleX(' + ghostHp.blue + ')';
+  }
+
   function updateHud() {
-    hpRed.style.transform = 'scaleX(' + hpRatio('red') + ')';
-    hpBlue.style.transform = 'scaleX(' + hpRatio('blue') + ')';
     powerFill.style.width = Math.min(100, powerProgress) + '%';
+    powerFill.classList.toggle('charged', powerProgress >= 90);
     if (bonusPoolAmountEl) {
       bonusPoolAmountEl.textContent = String(Math.floor(bonusPool));
     }
@@ -614,6 +667,7 @@
       const step = Math.min(5, Math.max(0, comboCountState));
       comboFill.style.width = (step / 5) * 100 + '%';
       comboLabel.textContent = step + ' / 5' + (step >= 5 ? ' ⚡ team bonus' : '');
+      comboFill.classList.toggle('full', step >= 5);
     }
     const now = Date.now();
     const powerOn = now < powerUntil;
@@ -831,7 +885,7 @@
     }
   }
 
-  function spawnFloat(targetTower, text, crit) {
+  function spawnFloat(targetTower, text, crit, attacker) {
     const g = towerGeom();
     const tr = targetTower === 'red' ? g.red : g.blue;
     const x = tr.cx + (Math.random() - 0.5) * tr.w * 0.5;
@@ -841,11 +895,11 @@
       x,
       y,
       text,
+      sub: attacker ? truncateNickname(attacker, 16) : null,
       crit: !!crit,
       teamColor: teamColor,
-      vy: -1.1 - Math.random() * 0.5,
-      vx: (Math.random() - 0.5) * 1.0,
-      a: 1,
+      born: performance.now(),
+      seed: Math.random() * Math.PI * 2,
     });
   }
 
@@ -911,6 +965,17 @@
     bumpCameraToTower(side, 1.2);
     spawnTowerSparks(cx, cy, 70);
     spawnExplosion(cx, cy, 420);
+    const rgb = side === 'red' ? '255,130,190' : '130,245,255';
+    spawnHitGlow(cx, cy, rgb, 190);
+    spawnShockwave(cx, cy, rgb, 240, 6);
+    spawnShockwave(cx, cy, '255,255,255', 150, 3);
+    const ca = side === 'red' ? 'rgba(255,120,170,0.95)' : 'rgba(120,240,255,0.95)';
+    const cb = side === 'red' ? 'rgba(150,40,80,0.95)' : 'rgba(20,120,150,0.95)';
+    spawnDebris(cx, cy, 26, ca, cb);
+    towerHitFlash[side] = 1;
+    towerSquash[side] = 0.16;
+    addShake(14);
+    triggerHitStop(60);
   }
 
   function addTowerImpact(targetTower, damage) {
@@ -925,20 +990,97 @@
   }
 
   function spawnExplosion(x, y, power) {
-    const n = Math.min(120, 35 + (power | 0));
+    const n = Math.min(150, 45 + (power | 0));
     for (let i = 0; i < n; i++) {
       const ang = Math.random() * Math.PI * 2;
       const sp = 1.5 + Math.random() * (6 + power * 0.015);
+      const roll = Math.random();
+      const c =
+        roll < 0.4
+          ? 'rgba(255,225,130,'
+          : roll < 0.75
+            ? 'rgba(255,200,80,'
+            : 'rgba(255,60,140,';
       particles.push({
         x,
         y,
         vx: Math.cos(ang) * sp,
         vy: Math.sin(ang) * sp - 0.8,
         r: 1.5 + Math.random() * 2.5,
-        c: Math.random() < 0.5 ? 'rgba(255,200,80,' : 'rgba(255,60,140,',
+        c: c,
+        life: 0.9 + Math.random() * 0.35,
+        glow: Math.random() < 0.35,
+      });
+    }
+  }
+
+  function addShake(mag) {
+    shakeMag = Math.min(26, shakeMag + (mag || 0));
+  }
+
+  function triggerHitStop(ms) {
+    hitStopUntil = Math.max(hitStopUntil, performance.now() + (ms || 0));
+  }
+
+  function spawnShockwave(x, y, rgb, rMax, lw) {
+    shockwaves.push({
+      x,
+      y,
+      rgb: rgb || '255,255,255',
+      r: 8,
+      rMax: rMax || 70,
+      lw: lw || 4,
+    });
+  }
+
+  function spawnHitGlow(x, y, rgb, size) {
+    hitGlows.push({
+      x,
+      y,
+      rgb: rgb || '255,255,255',
+      size: size || 70,
+      born: performance.now(),
+    });
+  }
+
+  function spawnDebris(x, y, n, colorA, colorB) {
+    const count = Math.min(44, n | 0);
+    for (let i = 0; i < count; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const sp = 2 + Math.random() * 6.5;
+      debris.push({
+        x,
+        y,
+        vx: Math.cos(ang) * sp,
+        vy: Math.sin(ang) * sp - 2.4,
+        rot: Math.random() * Math.PI,
+        vr: (Math.random() - 0.5) * 0.35,
+        w: 3 + Math.random() * 5,
+        h: 2 + Math.random() * 4,
+        c: Math.random() < 0.5 ? colorA : colorB,
         life: 1,
       });
     }
+  }
+
+  function spawnTowerHitFx(side, power, crit) {
+    const g = towerGeom();
+    const t = side === 'red' ? g.red : g.blue;
+    const cx = t.cx + (Math.random() - 0.5) * t.w * 0.4;
+    const cy = t.y + t.h * (0.35 + Math.random() * 0.4);
+    const rgb = side === 'red' ? '255,130,190' : '130,245,255';
+    const pw = Math.min(2.5, power || 0.5);
+    spawnHitGlow(cx, cy, rgb, 46 + pw * 55 + (crit ? 60 : 0));
+    spawnShockwave(cx, cy, rgb, 55 + pw * 70 + (crit ? 90 : 0), crit ? 5 : 3.5);
+    towerHitFlash[side] = Math.min(1, towerHitFlash[side] + 0.3 + pw * 0.2 + (crit ? 0.35 : 0));
+    towerSquash[side] = Math.min(0.16, towerSquash[side] + 0.045 + pw * 0.025 + (crit ? 0.05 : 0));
+    if (pw > 0.45 || crit) {
+      const ca = side === 'red' ? 'rgba(255,120,170,0.95)' : 'rgba(120,240,255,0.95)';
+      const cb = side === 'red' ? 'rgba(150,40,80,0.95)' : 'rgba(20,120,150,0.95)';
+      spawnDebris(cx, cy, Math.floor(10 + pw * 14) + (crit ? 10 : 0), ca, cb);
+    }
+    addShake(Math.min(9, 1.2 + pw * 2.4) + (crit ? 6 : 0));
+    if (crit) triggerHitStop(75);
   }
 
   function drawBackground() {
@@ -954,7 +1096,7 @@
       grd.addColorStop(1, 'rgba(120,255,240,0.32)');
     }
     ctx.fillStyle = grd;
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillRect(-40, -40, W + 80, H + 80);
 
     const powerOn = Date.now() < powerUntil;
     if (powerOn && !suddenDeathActive) {
@@ -979,12 +1121,33 @@
     }
 
     ctx.save();
-    ctx.globalAlpha = suddenDeathActive ? 0.1 : 0.14;
-    for (let i = 0; i < 50; i++) {
-      ctx.fillStyle = suddenDeathActive ? '#ffaaaa' : '#fff';
+    ctx.fillStyle = suddenDeathActive ? '#ffaaaa' : '#fff';
+    for (let i = 0; i < 56; i++) {
+      const tw = 0.5 + 0.5 * Math.sin(t * (1.2 + (i % 5) * 0.5) + i * 1.7);
+      ctx.globalAlpha = (suddenDeathActive ? 0.1 : 0.14) + tw * 0.22;
+      const sx = (i * 73 + t * 7) % W;
+      const sy = (i * 41 + t * 11) % H;
       ctx.beginPath();
-      ctx.arc((i * 73) % W, (i * 41 + performance.now() * 0.02) % H, 2, 0, Math.PI * 2);
+      ctx.arc(sx, sy, 1.1 + (i % 3) * 0.8, 0, Math.PI * 2);
       ctx.fill();
+    }
+    ctx.restore();
+
+    const g = towerGeom();
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    const glowDefs = [
+      { tt: g.red, rgb: '255,80,150' },
+      { tt: g.blue, rgb: '80,230,220' },
+    ];
+    for (let i = 0; i < glowDefs.length; i++) {
+      const gd = glowDefs[i];
+      const gy = gd.tt.y + gd.tt.h;
+      const gr = ctx.createRadialGradient(gd.tt.cx, gy, 0, gd.tt.cx, gy, gd.tt.w * 1.6);
+      gr.addColorStop(0, 'rgba(' + gd.rgb + ',0.2)');
+      gr.addColorStop(1, 'rgba(' + gd.rgb + ',0)');
+      ctx.fillStyle = gr;
+      ctx.fillRect(gd.tt.cx - gd.tt.w * 1.7, gy - gd.tt.w * 0.5, gd.tt.w * 3.4, gd.tt.w * 1.6);
     }
     ctx.restore();
   }
@@ -1005,6 +1168,24 @@
       ctx.scale(-1, 1);
       ctx.translate(-t.cx, 0);
     }
+    const sq = towerSquash[side];
+    if (sq > 0.002) {
+      ctx.translate(t.cx, t.y + t.h);
+      ctx.scale(1 + sq * 0.7, 1 - sq);
+      ctx.translate(-t.cx, -(t.y + t.h));
+    }
+    if (winnerSide === side && !gameState.running) {
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.005);
+      const aurR = Math.max(t.w, t.h) * (1.3 + pulse * 0.2);
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      const rg = ctx.createRadialGradient(t.cx, t.cy, 0, t.cx, t.cy, aurR);
+      rg.addColorStop(0, 'rgba(255,215,110,' + (0.3 + pulse * 0.22).toFixed(3) + ')');
+      rg.addColorStop(1, 'rgba(255,215,110,0)');
+      ctx.fillStyle = rg;
+      ctx.fillRect(t.cx - aurR, t.cy - aurR, aurR * 2, aurR * 2);
+      ctx.restore();
+    }
     const x = t.x;
     const y = t.y;
     const w = t.w;
@@ -1018,27 +1199,27 @@
 
     ctx.shadowColor = side === 'red' ? 'rgba(255,60,130,0.55)' : 'rgba(0,220,200,0.55)';
     ctx.shadowBlur = 16;
-    ctx.beginPath();
-    ctx.moveTo(x + skew, y + h * 0.22);
-    ctx.lineTo(x + w - skew, y + h * 0.18);
-    ctx.lineTo(x + w, y + h);
-    ctx.lineTo(x, y + h);
-    ctx.closePath();
+    const bodyPath = new Path2D();
+    bodyPath.moveTo(x + skew, y + h * 0.22);
+    bodyPath.lineTo(x + w - skew, y + h * 0.18);
+    bodyPath.lineTo(x + w, y + h);
+    bodyPath.lineTo(x, y + h);
+    bodyPath.closePath();
     ctx.fillStyle = bodyGrad;
-    ctx.fill();
+    ctx.fill(bodyPath);
 
     const upperH = h * 0.42;
-    ctx.beginPath();
-    ctx.moveTo(x + skew * 0.5, y + h * 0.22);
-    ctx.lineTo(x + w - skew * 0.5, y + h * 0.18);
-    ctx.lineTo(x + w - skew * 0.3, y + h * 0.22 - upperH);
-    ctx.lineTo(x + skew * 0.3, y + h * 0.22 - upperH);
-    ctx.closePath();
+    const topPath = new Path2D();
+    topPath.moveTo(x + skew * 0.5, y + h * 0.22);
+    topPath.lineTo(x + w - skew * 0.5, y + h * 0.18);
+    topPath.lineTo(x + w - skew * 0.3, y + h * 0.22 - upperH);
+    topPath.lineTo(x + skew * 0.3, y + h * 0.22 - upperH);
+    topPath.closePath();
     const upGrad = ctx.createLinearGradient(x, y, x + w, y + upperH);
     upGrad.addColorStop(0, colLight);
     upGrad.addColorStop(1, col2);
     ctx.fillStyle = upGrad;
-    ctx.fill();
+    ctx.fill(topPath);
 
     const merlonW = w / 7;
     for (let m = 0; m < 6; m++) {
@@ -1051,7 +1232,7 @@
     ctx.shadowBlur = 0;
     ctx.strokeStyle = 'rgba(255,255,255,0.75)';
     ctx.lineWidth = 2;
-    ctx.stroke();
+    ctx.stroke(topPath);
 
     ctx.fillStyle = 'rgba(0,0,0,0.35)';
     ctx.fillRect(x + w * 0.35, y + h * 0.45, w * 0.12, h * 0.18);
@@ -1082,6 +1263,13 @@
       }
     }
 
+    const flash = towerHitFlash[side];
+    if (flash > 0.02) {
+      ctx.fillStyle = 'rgba(255,255,255,' + Math.min(1, flash * 0.85).toFixed(3) + ')';
+      ctx.fill(bodyPath);
+      ctx.fill(topPath);
+    }
+
     const m = Math.max(0, Math.min(1, (towerImpactMeter[side] || 0) / TOWER_IMPACT_THRESHOLD));
     const bx = x + w * 0.12;
     const by = Math.max(hudTopReservePx + 6, y - h * 0.12);
@@ -1109,29 +1297,74 @@
       }
       const x = b.sx + (b.tx - b.sx) * b.t;
       const y = b.sy + (b.ty - b.sy) * b.t;
-      ctx.font = '22px Segoe UI Emoji, Apple Color Emoji';
+      const t0 = Math.max(0, b.t - 0.07);
+      const tx0 = b.sx + (b.tx - b.sx) * t0;
+      const ty0 = b.sy + (b.ty - b.sy) * t0;
+      const sizePop = 22 * Math.min(1, 0.45 + b.t * 3.2);
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.fillStyle = 'rgba(255,210,130,0.4)';
+      ctx.beginPath();
+      ctx.arc(tx0, ty0, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      ctx.font = Math.floor(sizePop) + 'px Segoe UI Emoji, Apple Color Emoji';
       ctx.fillText(b.emoji, x, y);
     }
   }
 
+  function easeOutBack(t) {
+    const c1 = 1.70158;
+    const c3 = c1 + 1;
+    const u = t - 1;
+    return 1 + c3 * u * u * u + c1 * u * u;
+  }
+
   function drawFloats() {
-    ctx.textAlign = 'center';
+    const now = performance.now();
     for (let i = floatTexts.length - 1; i >= 0; i--) {
       const f = floatTexts[i];
-      f.x += f.vx;
-      f.y += f.vy;
-      f.a -= 0.012;
-      if (f.a <= 0) {
+      const age = now - (f.born || 0);
+      const LIFE = f.crit ? 1500 : 1150;
+      if (age >= LIFE) {
         floatTexts.splice(i, 1);
         continue;
       }
+      const u = age / LIFE;
+      const pop = easeOutBack(Math.min(1, age / 170));
+      const settle = u > 0.82 ? 1 - ((u - 0.82) / 0.18) * 0.18 : 1;
+      const scale = (f.crit ? 1.32 : 1) * pop * settle;
+      const alpha = u < 0.7 ? 1 : 1 - (u - 0.7) / 0.3;
+      const rise = age * (f.crit ? 0.032 : 0.024);
+      const sway = Math.sin((f.seed || 0) + age * 0.006) * (f.crit ? 3.2 : 1.6);
+      const x = f.x + sway;
+      const y = f.y - rise;
       ctx.save();
-      ctx.globalAlpha = Math.max(0, f.a);
-      ctx.font = (f.crit ? '900 28px' : '800 23px') + ' Segoe UI, sans-serif';
-      ctx.fillStyle = f.crit ? '#fff59d' : f.teamColor || '#fff';
-      ctx.shadowColor = f.crit ? '#ff2d78' : 'rgba(0,0,0,0.9)';
-      ctx.shadowBlur = f.crit ? 14 : 6;
-      ctx.fillText(f.text, f.x, f.y);
+      ctx.translate(x, y);
+      ctx.scale(scale, scale);
+      ctx.globalAlpha = Math.max(0, alpha);
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+      if (f.crit) {
+        ctx.font = '900 34px Segoe UI, sans-serif';
+        ctx.fillStyle = '#fff59d';
+        ctx.shadowColor = '#ff2d78';
+        ctx.shadowBlur = 18;
+        ctx.fillText('💥 ' + f.text, 0, 0);
+      } else {
+        ctx.font = '800 24px Segoe UI, sans-serif';
+        ctx.fillStyle = f.teamColor || '#fff';
+        ctx.shadowColor = 'rgba(0,0,0,0.9)';
+        ctx.shadowBlur = 7;
+        ctx.fillText(f.text, 0, 0);
+      }
+      if (f.sub) {
+        ctx.font = '700 13px Segoe UI, sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.shadowColor = 'rgba(0,0,0,0.9)';
+        ctx.shadowBlur = 4;
+        ctx.fillText(f.sub, 0, f.crit ? 19 : 16);
+      }
       ctx.restore();
     }
   }
@@ -1242,15 +1475,92 @@
       p.x += p.vx;
       p.y += p.vy;
       p.vy += 0.12;
+      p.vx *= 0.995;
       p.life -= 0.014;
       if (p.life <= 0) {
         particles.splice(i, 1);
         continue;
       }
-      ctx.fillStyle = p.c + p.life * 0.9 + ')';
+      const a = p.life * 0.9;
+      if (p.glow) {
+        ctx.fillStyle = p.c + a * 0.25 + ')';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * 2.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = p.c + a + ')';
       ctx.beginPath();
       ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
       ctx.fill();
+    }
+  }
+
+  function drawShockwaves() {
+    for (let i = shockwaves.length - 1; i >= 0; i--) {
+      const s = shockwaves[i];
+      if (s.r >= s.rMax) {
+        shockwaves.splice(i, 1);
+        continue;
+      }
+      s.r += Math.max(2.5, (s.rMax - s.r) * 0.16);
+      const k = s.r / s.rMax;
+      const a = 0.85 * (1 - k);
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      ctx.strokeStyle = 'rgba(' + s.rgb + ',' + a.toFixed(3) + ')';
+      ctx.lineWidth = Math.max(1, s.lw * (1 - k));
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawHitGlows() {
+    const now = performance.now();
+    for (let i = hitGlows.length - 1; i >= 0; i--) {
+      const gl = hitGlows[i];
+      const age = now - gl.born;
+      if (age > 240) {
+        hitGlows.splice(i, 1);
+        continue;
+      }
+      const u = age / 240;
+      const r = gl.size * (0.55 + u * 0.95);
+      ctx.save();
+      ctx.globalCompositeOperation = 'screen';
+      const rg = ctx.createRadialGradient(gl.x, gl.y, 0, gl.x, gl.y, r);
+      rg.addColorStop(0, 'rgba(255,255,255,' + (0.85 * (1 - u)).toFixed(3) + ')');
+      rg.addColorStop(0.4, 'rgba(' + gl.rgb + ',' + (0.55 * (1 - u)).toFixed(3) + ')');
+      rg.addColorStop(1, 'rgba(' + gl.rgb + ',0)');
+      ctx.fillStyle = rg;
+      ctx.beginPath();
+      ctx.arc(gl.x, gl.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawDebris() {
+    for (let i = debris.length - 1; i >= 0; i--) {
+      const d = debris[i];
+      d.x += d.vx;
+      d.y += d.vy;
+      d.vy += 0.22;
+      d.vx *= 0.99;
+      d.rot += d.vr;
+      d.life -= 0.016;
+      if (d.life <= 0 || d.y > H + 30) {
+        debris.splice(i, 1);
+        continue;
+      }
+      ctx.save();
+      ctx.translate(d.x, d.y);
+      ctx.rotate(d.rot);
+      ctx.globalAlpha = Math.min(1, d.life * 1.4);
+      ctx.fillStyle = d.c;
+      ctx.fillRect(-d.w * 0.5, -d.h * 0.5, d.w, d.h);
+      ctx.restore();
     }
   }
 
@@ -1370,17 +1680,40 @@
   }
 
   function tick() {
+    if (performance.now() < hitStopUntil) {
+      requestAnimationFrame(tick);
+      return;
+    }
+
     camZoom += (1 - camZoom) * 0.038;
     if (camZoom < 1.0005) camZoom = 1;
     camPanX *= 0.92;
     camPanY *= 0.92;
 
+    let shx = 0;
+    let shy = 0;
+    if (shakeMag > 0.08) {
+      shx = (Math.random() * 2 - 1) * shakeMag;
+      shy = (Math.random() * 2 - 1) * shakeMag * 0.85;
+      shakeMag *= 0.86;
+    } else {
+      shakeMag = 0;
+    }
+
+    towerHitFlash.red = Math.max(0, towerHitFlash.red - 0.05);
+    towerHitFlash.blue = Math.max(0, towerHitFlash.blue - 0.05);
+    towerSquash.red *= 0.8;
+    towerSquash.blue *= 0.8;
+    if (towerSquash.red < 0.002) towerSquash.red = 0;
+    if (towerSquash.blue < 0.002) towerSquash.blue = 0;
+
+    updateHpBars();
     updateMatchTimer();
 
     const cx = W * 0.5;
     const cy = H * 0.5;
     ctx.save();
-    ctx.translate(cx + camPanX, cy + camPanY);
+    ctx.translate(cx + camPanX + shx, cy + camPanY + shy);
     ctx.scale(camZoom, camZoom);
     ctx.translate(-cx, -cy);
 
@@ -1427,8 +1760,11 @@
       });
     }
     drawSmokes();
+    drawHitGlows();
     drawBullets();
     drawParticles();
+    drawDebris();
+    drawShockwaves();
     drawFloats();
     drawLikePops();
     drawLikeBridgePulses();
@@ -1437,6 +1773,11 @@
     drawConfetti();
     updateAndDrawJoinParticles(ctx);
     ctx.restore();
+
+    if (vignetteGrad) {
+      ctx.fillStyle = vignetteGrad;
+      ctx.fillRect(0, 0, W, H);
+    }
 
     requestAnimationFrame(tick);
   }
@@ -1518,8 +1859,13 @@
     addTowerImpact(target, ev.damage);
 
     const serverCrit = !!ev.isCrit;
+    const isCrit = serverCrit || ev.totalMultiplier >= 50 || ev.damage >= 8000;
     const bigMult = (ev.totalMultiplier >= 25 || ev.damage >= 4000 || (ev.giftDiamondTotal || 0) >= 80);
-    if (bigMult) bumpCameraToTower(target, 1);
+    spawnTowerHitFx(target, Math.min(2.5, 0.5 + (ev.damage || 0) / 2500), isCrit);
+    if (bigMult) {
+      bumpCameraToTower(target, 1);
+      addShake(5);
+    }
     const ra =
       gameState[target] && gameState[target].maxHp
         ? gameState[target].hp / gameState[target].maxHp
@@ -1528,10 +1874,11 @@
 
     if (serverCrit) {
       flashCrit();
+      addShake(10);
+      triggerHitStop(90);
     }
 
-    const isCrit = serverCrit || ev.totalMultiplier >= 50 || ev.damage >= 8000;
-    spawnFloat(target, '+' + ev.damage + ' points' + (isCrit ? ' · belirgin' : ''), isCrit);
+    spawnFloat(target, '+' + ev.damage + ' points', isCrit, (ev.user && ev.user.nickname) || null);
     if (ev.teamTop) {
       teamTopState = ev.teamTop;
       renderTeamTop();
@@ -1754,6 +2101,33 @@
   socket.on('gameOver', function (p) {
     gameState = p.gameState || gameState;
     updateHud();
+    winnerSide = gameState.winner || (p.destroyedTower === 'blue' ? 'red' : 'blue');
+    if (p.destroyedTower) {
+      const g = towerGeom();
+      const dt = p.destroyedTower === 'blue' ? g.blue : g.red;
+      const rgb = p.destroyedTower === 'blue' ? '130,245,255' : '255,130,190';
+      spawnHitGlow(dt.cx, dt.cy, '255,220,130', 300);
+      spawnShockwave(dt.cx, dt.cy, rgb, 340, 7);
+      spawnShockwave(dt.cx, dt.cy, '255,255,255', 220, 4);
+      spawnExplosion(dt.cx, dt.cy, 600);
+      const ca = p.destroyedTower === 'blue' ? 'rgba(120,240,255,0.95)' : 'rgba(255,120,170,0.95)';
+      const cb = p.destroyedTower === 'blue' ? 'rgba(20,120,150,0.95)' : 'rgba(150,40,80,0.95)';
+      for (let k = 0; k < 3; k++) {
+        spawnDebris(dt.cx + (Math.random() - 0.5) * dt.w, dt.y + dt.h * 0.5, 16, ca, cb);
+      }
+      for (let k = 0; k < 6; k++) {
+        smokes.push({
+          x: dt.cx + (Math.random() - 0.5) * dt.w,
+          y: dt.y + dt.h * (0.3 + Math.random() * 0.5),
+          vx: (Math.random() - 0.5) * 0.8,
+          vy: -0.9 - Math.random(),
+          r: 14 + Math.random() * 22,
+          a: 0.5,
+        });
+      }
+      addShake(18);
+      triggerHitStop(110);
+    }
     const m = p.mvp;
     if (m && m.nickname) {
       mvp.classList.add('show');
@@ -1787,6 +2161,11 @@
     powerUntil = 0;
     towerImpactMeter.red = 0;
     towerImpactMeter.blue = 0;
+    winnerSide = null;
+    towerHitFlash.red = 0;
+    towerHitFlash.blue = 0;
+    towerSquash.red = 0;
+    towerSquash.blue = 0;
     suddenDeathActive = false;
     mvp.classList.remove('show');
     if (p.gameStartedAt != null) gameStartedAt = p.gameStartedAt;

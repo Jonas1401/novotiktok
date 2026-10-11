@@ -411,6 +411,7 @@ body {
 }
 
 .hp-bar {
+  position: relative;
   height: 14px;
   border-radius: 10px;
   overflow: hidden;
@@ -419,10 +420,21 @@ body {
 }
 
 .hp-fill {
-  height: 100%;
-  width: 100%;
+  position: absolute;
+  inset: 0;
   transform-origin: left center;
-  transition: transform 0.1s linear;
+}
+
+.hp-ghost {
+  position: absolute;
+  inset: 0;
+  transform-origin: left center;
+  opacity: 0.85;
+}
+
+.hp-ghost.red,
+.hp-ghost.blue {
+  background: linear-gradient(90deg, rgba(255, 170, 60, 0.95), rgba(255, 225, 130, 0.95));
 }
 
 .hp-fill.red {
@@ -452,9 +464,27 @@ body {
 #powerFill {
   height: 100%;
   width: 0%;
-  background: linear-gradient(90deg, #ffe566, #ffb300);
+  background: linear-gradient(90deg, #ffe566, #ffb300, #fff3a6, #ffb300);
+  background-size: 250% 100%;
+  animation: powerShimmer 1.8s linear infinite;
   box-shadow: 0 0 12px rgba(255, 200, 0, 0.8);
   transition: width 0.08s linear;
+}
+
+#powerFill.charged {
+  box-shadow:
+    0 0 12px rgba(255, 200, 0, 0.8),
+    0 0 22px rgba(255, 235, 120, 0.95);
+  animation: powerShimmer 0.7s linear infinite;
+}
+
+@keyframes powerShimmer {
+  from {
+    background-position: 0% 0;
+  }
+  to {
+    background-position: 250% 0;
+  }
 }
 
 #powerLabel {
@@ -911,6 +941,20 @@ body {
   width: 0%;
   background: linear-gradient(90deg, #7b5cff, #ff3b8d);
   transition: width 0.12s linear;
+}
+
+#comboFill.full {
+  animation: comboFullPulse 0.6s ease-in-out infinite;
+}
+
+@keyframes comboFullPulse {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.7);
+  }
 }
 
 #comboLabel {
