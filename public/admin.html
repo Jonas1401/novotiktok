@@ -56,6 +56,13 @@
   </div>
 
   <div class="row">
+    <label style="display: flex; align-items: center; gap: 8px;">
+      <input type="checkbox" id="chkMuteAudio" />
+      Mute game audio in the game view (SFX + music)
+    </label>
+  </div>
+
+  <div class="row">
     <label>Offline test events (no TikTok connection needed)</label>
     <input type="text" id="simName" placeholder="Viewer name (optional)" maxlength="24" />
     <input type="number" id="simDiamonds" value="50" min="1" step="1" />
@@ -94,6 +101,18 @@
     }
     const simName = () => document.getElementById('simName').value || 'Test Viewer';
     const simDiamonds = () => Number(document.getElementById('simDiamonds').value) || 50;
+
+    // Mute toggle: stored in localStorage; the game page (same origin) applies it
+    // on load and live via the 'storage' event.
+    const chkMute = document.getElementById('chkMuteAudio');
+    try {
+      chkMute.checked = localStorage.getItem('ltbMuted') === '1';
+    } catch (e) {}
+    chkMute.onchange = () => {
+      try {
+        localStorage.setItem('ltbMuted', chkMute.checked ? '1' : '0');
+      } catch (e) {}
+    };
 
     document.getElementById('btnExtend').onclick = () =>
       api({ action: 'extendMatch', ms: Number(document.getElementById('extendMs').value) || 60000 });

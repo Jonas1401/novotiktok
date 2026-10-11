@@ -20,6 +20,11 @@ Interactive stream game where viewers affect a real-time **Red vs Blue tower bat
 - Power mode triggered by engagement
 - Daily leaderboard and per-match team contribution panels
 - Streamer/admin panel with manual controls and offline test events
+- Fully synthesized audio (Web Audio API, zero audio files): a synthwave loop
+  that shifts into an intense sudden-death mode, dramatic SFX for hits/crits/
+  bursts, a victory fanfare and UI chimes. Browsers require one click or key
+  press on the overlay before sound plays (autoplay policy); it can be muted
+  from the `/admin` panel (applied to the game view via `localStorage`)
 
 ## Tech Stack
 
@@ -35,6 +40,7 @@ Interactive stream game where viewers affect a real-time **Red vs Blue tower bat
 server.js              backend game engine, TikTok integration, API routes, Socket.IO server
 public/index.html      main game page
 public/game.js         client renderer, animations, socket listeners
+public/audio.js        procedural audio engine (SFX + music, Web Audio API)
 public/style.css       game and HUD styling
 public/admin.html      streamer control interface
 Dockerfile             container image for WebSocket-capable hosts

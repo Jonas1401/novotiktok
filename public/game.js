@@ -19,6 +19,35 @@
   const giftDropCanvas = document.getElementById('giftDropCanvas');
   const pctx = giftDropCanvas.getContext('2d');
 
+  // Procedural audio engine (public/audio.js) — SFX + music, all synthesized.
+  const LTB = typeof window.LTBAudio === 'object' && window.LTBAudio ? window.LTBAudio : null;
+  let musicModeState = null;
+  let prevPowerOn = null;
+
+  // Keeps the music loop in sync with the match (normal / sudden death / ended).
+  function syncMusicMode() {
+    if (!LTB) return;
+    const m = !gameState.running ? 'ended' : (suddenDeathActive ? 'sd' : 'normal');
+    if (m !== musicModeState) {
+      musicModeState = m;
+      LTB.musicMode(m);
+    }
+  }
+
+  // Streamers can mute the overlay audio from the admin panel (same-origin
+  // localStorage key 'ltbMuted'); the storage event keeps tabs in sync.
+  function applyAudioMute() {
+    if (!LTB) return;
+    let m = false;
+    try {
+      m = localStorage.getItem('ltbMuted') === '1';
+    } catch (e) {}
+    LTB.setMuted(m);
+  }
+  window.addEventListener('storage', function (e) {
+    if (e && e.key === 'ltbMuted') applyAudioMute();
+  });
+
   const hpRed = document.getElementById('hpRed');
   const hpBlue = document.getElementById('hpBlue');
   const hpRedGhost = document.getElementById('hpRedGhost');
@@ -671,6 +700,8 @@
     }
     const now = Date.now();
     const powerOn = now < powerUntil;
+    if (prevPowerOn === true && !powerOn && gameState.running && LTB) LTB.powerOff();
+    prevPowerOn = powerOn;
     powerOverlay.classList.toggle('on', powerOn);
     if (powerOn) {
       const s = Math.max(0, Math.ceil((powerUntil - now) / 1000));
@@ -760,6 +791,7 @@
     if (ac && ac.state === 'suspended') {
       ac.resume().catch(function () {});
     }
+    if (LTB) LTB.unlock();
     flushPendingSpikerTts();
     if (pendingVipChime) {
       pendingVipChime = false;
@@ -786,6 +818,10 @@
   }
 
   function playVipChimeNow() {
+    if (LTB) {
+      LTB.vip();
+      return;
+    }
     const ac = getSharedAudioContext();
     if (!ac) return;
     function runOsc() {
@@ -976,6 +1012,7 @@
     towerSquash[side] = 0.16;
     addShake(14);
     triggerHitStop(60);
+    if (LTB) LTB.explosion();
   }
 
   function addTowerImpact(targetTower, damage) {
@@ -1081,6 +1118,10 @@
     }
     addShake(Math.min(9, 1.2 + pw * 2.4) + (crit ? 6 : 0));
     if (crit) triggerHitStop(75);
+    if (LTB) {
+      if (crit) LTB.crit();
+      else LTB.hit(Math.min(1, pw / 2.5));
+    }
   }
 
   function drawBackground() {
@@ -1837,6 +1878,7 @@
   async function processGift(ev) {
     giftOverlay.classList.add('show');
     giftCaption.textContent = '';
+    if (LTB) LTB.gift();
     resize();
 
     await runGiftThankYouPanel(ev, 'Thanks for the support');
@@ -1850,7 +1892,10 @@
 
     gameState = ev.gameState;
     if (ev.bonusPool != null) bonusPool = ev.bonusPool;
-    if (ev.comboCount != null) comboCountState = ev.comboCount;
+    if (ev.comboCount != null) {
+      if (ev.comboCount >= 5 && comboCountState < 5 && LTB) LTB.comboFull();
+      comboCountState = ev.comboCount;
+    }
     const g = towerGeom();
     const target = ev.targetTower;
     const tr = target === 'red' ? g.red : g.blue;
@@ -2024,8 +2069,11 @@
     if (payload.gameStartedAt != null) gameStartedAt = payload.gameStartedAt;
     towerImpactMeter.red = 0;
     towerImpactMeter.blue = 0;
+    winnerSide = null;
     if (payload.teamTop) teamTopState = payload.teamTop;
     if (payload.teamTotals) teamTotalsState = payload.teamTotals;
+    applyAudioMute();
+    syncMusicMode();
     resize();
     renderTeamTop();
     updateHud();
@@ -2051,6 +2099,7 @@
       teamTotalsState = payload.teamTotals;
       renderTeamTotals();
     }
+    syncMusicMode();
     updateHud();
   });
 
@@ -2058,6 +2107,7 @@
     powerProgress = p.powerProgress || 0;
     const fu = p.until;
     powerUntil = fu && fu > Date.now() ? fu : 0;
+    if (p && p.active && LTB) LTB.powerOn();
     updateHud();
   });
 
@@ -2067,6 +2117,7 @@
     spawnEmojiBurst(Math.min(400, c * 3));
     spawnLikePops(c);
     spawnLikeBridgePulse(c);
+    if (LTB) LTB.like();
     updateHud();
   });
 
@@ -2102,6 +2153,8 @@
     gameState = p.gameState || gameState;
     updateHud();
     winnerSide = gameState.winner || (p.destroyedTower === 'blue' ? 'red' : 'blue');
+    syncMusicMode();
+    if (LTB) LTB.fanfare();
     if (p.destroyedTower) {
       const g = towerGeom();
       const dt = p.destroyedTower === 'blue' ? g.blue : g.red;
@@ -2175,6 +2228,8 @@
     if (p.leaderboardTop && p.leaderboardTop.length) {
       showLeaderboardBrief(p.leaderboardTop);
     }
+    syncMusicMode();
+    if (LTB) LTB.resetChime();
     updateHud();
   });
 
@@ -2184,11 +2239,14 @@
 
   socket.on('suddenDeath', function (p) {
     suddenDeathActive = !!(p && p.active);
+    if (suddenDeathActive && LTB) LTB.suddenDeath();
+    syncMusicMode();
     updateHud();
   });
 
   socket.on('bonusPoolWin', function (p) {
     bonusPool = 0;
+    if (LTB) LTB.coin();
     updateHud();
     const w = (p && p.winner && p.winner.nickname) || (p && p.mvp && p.mvp.nickname) || 'Player';
     showBonusPoolCelebration(p && p.amount != null ? p.amount : 0, w);
